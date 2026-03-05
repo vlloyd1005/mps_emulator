@@ -4,7 +4,7 @@
 #
 # Usage:
 #   sbatch train.sh --cosmo_type w0wacdm --prior_type expanded --nl_type lin
-#   sbatch rain.sh --cosmo_type lcdm --prior_type fiducial --nl_type nl --n_batches 40
+#   sbatch rain.sh --cosmo_type lcdm --prior_type constrained --nl_type nl --n_batches 40
 #
 # All flags after the sbatch options are forwarded verbatim to train.py.
 # Run `python ./mps_emu/train.py --help` to see all available flags.
