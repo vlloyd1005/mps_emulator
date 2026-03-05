@@ -33,7 +33,7 @@ ROOT = _get_project_root()
 try:
     from tensorflow import keras
     import sys; sys.path.insert(0, f"{ROOT}/symbolic_pofk")
-    from symbolic_pofk.linear_VM import plin_emulated, get_approximate_D, growth_correction_R
+    from symbolic_pofk.linear_VM import plin_emulated, get_approximate_D, growth_correction_R, get_eisensteinhu_nw
     _DEPENDENCIES_LOADED = True
 except ImportError as e:
     logging.error("FATAL ERROR: A required dependency could not be imported.")
@@ -68,7 +68,7 @@ VALID_NL_TYPES_BY_PRIOR = {
 VALID_COSMO_TYPES = {"lcdm", "w0wacdm"}
 
 
-def _validate_config(cosmo_type: str, prior_type: str, nl_type: str) -> None:
+def _validate_config(cosmo_type: str, prior_type: str, nl_type: str, num_batches: int) -> None:
     if cosmo_type not in VALID_COSMO_TYPES:
         raise ValueError(
             f"Unknown cosmo_type '{cosmo_type}'. Must be one of: {sorted(VALID_COSMO_TYPES)}"
@@ -90,12 +90,12 @@ def _validate_config(cosmo_type: str, prior_type: str, nl_type: str) -> None:
         raise ValueError("prior_type='expanded' is only supported for cosmo_type='w0wacdm'.")
 
 
-def _metadata_tag(cosmo_type: str, prior_type: str, nl_type: str) -> str:
-    return f"{cosmo_type}_{prior_type}_{nl_type}"
+def _metadata_tag(cosmo_type: str, prior_type: str, nl_type: str, num_batches: str) -> str:
+    return f"{cosmo_type}_{prior_type}_{nl_type}_nTrain{num_batches}"
 
 
-def _model_filename(cosmo_type: str, prior_type: str, nl_type: str) -> str:
-    return f"emulator_{_metadata_tag(cosmo_type, prior_type, nl_type)}.h5"
+def _model_filename(cosmo_type: str, prior_type: str, nl_type: str, num_batches: str) -> str:
+    return f"emulator_{_metadata_tag(cosmo_type, prior_type, nl_type, num_batches)}.h5"
 
 
 # ----------------------------------------------------------------------------------------------------
@@ -149,11 +149,12 @@ class PkEmulator:
         if not _DEPENDENCIES_LOADED:
             raise RuntimeError("Cannot initialise PkEmulator: missing dependencies.")
 
-        _validate_config(cosmo_type, prior_type, nl_type)
+        _validate_config(cosmo_type, prior_type, nl_type, num_batches)
 
         self.cosmo_type = cosmo_type
         self.prior_type = prior_type
         self.nl_type    = nl_type
+        self.num_batches = num_batches
 
         logging.info(
             f"[PkEmulator] Initialising: cosmo_type='{cosmo_type}', "
@@ -163,7 +164,7 @@ class PkEmulator:
         self.MODEL_DIR    = ROOT / base_model_path
         self.METADATA_DIR = (
             ROOT / base_metadata_path
-            / f"metadata_{_metadata_tag(cosmo_type, prior_type, nl_type)}"
+            / f"metadata_{_metadata_tag(cosmo_type, prior_type, nl_type, num_batches)}"
         )
         self.NUM_BATCHES  = num_batches
 
@@ -195,7 +196,7 @@ class PkEmulator:
                 )
 
             # --- Neural network ---
-            model_file = self.MODEL_DIR / _model_filename(cosmo_type, prior_type, nl_type)
+            model_file = self.MODEL_DIR / _model_filename(cosmo_type, prior_type, nl_type, num_batches)
             logging.info(f"[PkEmulator] Loading model: {model_file}")
             self.model = keras.models.load_model(
                 model_file,
@@ -286,7 +287,7 @@ class PkEmulator:
             raise
 
     # -------------------------------------------------------
-    def _compute_mps_approximation(self, params: np.ndarray) -> np.ndarray:
+    def _compute_mps_approximation(self, params: np.ndarray, use_eh=True) -> np.ndarray:
         """
         Analytical P_lin(k, z) approximation via symbolic_pofk + growth factors.
 
@@ -302,7 +303,10 @@ class PkEmulator:
         h = H0_in / 100.0
 
         k_for_plin = self.K_MODES / h
-        pk_fid     = plin_emulated(k_for_plin, Om, Ob, h, ns, As=As, w0=w0, wa=wa)
+        if use_eh:
+            pk_eh_hmpc = get_eisensteinhu_nw(k_for_plin, As, Om, Ob, h, ns, mnu=0.06, w0=w0, wa=wa)
+        else:
+            pk_fid     = plin_emulated(k_for_plin, Om, Ob, h, ns, As=As, w0=w0, wa=wa)
 
         a_array = 1.0 / (self.Z_MODES + 1)
         D0 = get_approximate_D(k=1e-4, As=As, Om=Om, Ob=Ob, h=h, ns=ns, mnu=0.06, w0=w0, wa=wa, a=1)
@@ -403,7 +407,7 @@ class PkEmulator:
 # Module-level interface with instance caching
 # ----------------------------------------------------------------------------------------------------
 
-_emulator_cache: Dict[Tuple[str, str, str], PkEmulator] = {}
+_emulator_cache: Dict[Tuple[str, str, str, int], PkEmulator] = {}
 
 
 def get_emulator(
@@ -417,13 +421,13 @@ def get_emulator(
     """
     Return a (cached) PkEmulator for the requested configuration.
 
-    Repeated calls with the same ``(cosmo_type, prior_type, nl_type)`` return
+    Repeated calls with the same ``(cosmo_type, prior_type, nl_type, num_batches)`` return
     the same instance without reloading files.
     """
     if not _DEPENDENCIES_LOADED:
         raise RuntimeError("Cannot create PkEmulator: missing dependencies.")
 
-    cache_key = (cosmo_type, prior_type, nl_type)
+    cache_key = (cosmo_type, prior_type, nl_type, num_batches)
     if cache_key in _emulator_cache:
         logging.info(f"[get_emulator] Returning cached emulator for {cache_key}")
         return _emulator_cache[cache_key]
@@ -446,6 +450,7 @@ def get_pks(
     cosmo_type: str = "w0wacdm",
     prior_type: str = "constrained",
     nl_type: str = "lin",
+    num_batches: int = 15,
     use_approximation_only: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -483,5 +488,6 @@ def get_pks(
         cosmo_type=cosmo_type,
         prior_type=prior_type,
         nl_type=nl_type,
+        num_batches=num_batches
     )
     return emulator.get_pks(params, use_approximation_only=use_approximation_only)

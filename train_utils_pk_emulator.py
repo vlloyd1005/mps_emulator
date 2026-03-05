@@ -20,7 +20,7 @@ from keras.regularizers import l1_l2
 from tqdm import tqdm
 
 import sys; sys.path.insert(0, "/gpfs/projects/MirandaGroup/victoria/cocoa/Cocoa/mps_emulator_train/symbolic_pofk"); import symbolic_pofk.linear_VL as linear
-import sys; sys.path.insert(0, "/gpfs/projects/MirandaGroup/victoria/cocoa/Cocoa/mps_emulator_train/symbolic_pofk"); from symbolic_pofk.linear_VL import plin_emulated, get_approximate_D, growth_correction_R
+import sys; sys.path.insert(0, "/gpfs/projects/MirandaGroup/victoria/cocoa/Cocoa/mps_emulator_train/symbolic_pofk"); from symbolic_pofk.linear_VL import plin_emulated, get_approximate_D, growth_correction_R, get_eisensteinhu_nw
 
 # ----------------------------------------------------------------------------------------------------
 # Parameter space
@@ -83,7 +83,7 @@ def _make_file_paths(base_path: str, cosmo_type: str, prior_type: str, nl_type: 
 
 
 # ----------------------------------------------------------------------------------------------------
-def _compute_mps_approximation(ks, zs, params: np.ndarray) -> np.ndarray:
+def _compute_mps_approximation(ks, zs, params: np.ndarray, use_eh=True) -> np.ndarray:
     """
     Computes the analytical P_lin(k, z) approximation in physical units (Mpc³).
 
@@ -96,7 +96,10 @@ def _compute_mps_approximation(ks, zs, params: np.ndarray) -> np.ndarray:
     As, ns, H0_in, Ob, Om, w0, wa = params
     h = H0_in / 100.0
     k_for_plin = ks / h
-    pk_fid_hmpc = plin_emulated(k_for_plin, Om, Ob, h, ns, As=As, w0=w0, wa=wa)
+    if use_eh:
+        pk_fid_hmpc = get_eisensteinhu_nw(k_for_plin, As, Om, Ob, h, ns, mnu=0.06, w0=w0, wa=wa)
+    else:
+        pk_fid_hmpc = plin_emulated(k_for_plin, Om, Ob, h, ns, As=As, w0=w0, wa=wa)
     a_array = 1.0 / (zs + 1)
     D0 = get_approximate_D(k=1e-4, As=As, Om=Om, Ob=Ob, h=h, ns=ns, mnu=0.06, w0=w0, wa=wa, a=1)
     Dz = get_approximate_D(k=1e-4, As=As, Om=Om, Ob=Ob, h=h, ns=ns, mnu=0.06, w0=w0, wa=wa, a=a_array)
@@ -267,7 +270,7 @@ class COLASet:
 
     # -------------------------------------------------------
     def _metadata_tag(self):
-        return f"{self.cosmo_type}_{self.prior_type}_{self.nl_type}"
+        return f"{self.cosmo_type}_{self.prior_type}_{self.nl_type}_nTrain{self.n_batches}"
 
     # -------------------------------------------------------
     def change_ks(self, ks):
@@ -512,13 +515,13 @@ class COLA_NN_Keras(COLAModel):
             f"({steps_per_epoch} steps/epoch, {total_steps} total steps)\n"
             f"  LR schedule     = CosineDecay  "
             f"{initial_lr:.2e} → {final_lr:.2e}\n"
-            f"  loss            = Huber(delta={huber_delta})\n"
+            f"  loss            = MSE\n"
             f"  epochs          = {num_epochs}"
         )
 
         mlp.compile(
             optimizer=keras.optimizers.Adam(learning_rate=lr_schedule),
-            loss=tf.keras.losses.Huber(delta=huber_delta),
+            loss=keras.losses.Huber(delta=1.0),
         )
 
         nn_model_train_keras(
@@ -592,7 +595,7 @@ class CustomActivationLayer(layers.Layer):
         return (input_shape[0], self.units)
 
 
-# ----------------------------------------------------------------------------------------------------
+
 def generate_mlp(input_shape, output_shape, num_layers, num_neurons,
                  activation="custom", alpha=0.01, l1_ratio=0.01,
                  learning_rate=1e-3, optimizer='adam', loss='mse'):
